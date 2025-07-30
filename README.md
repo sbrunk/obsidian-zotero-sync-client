@@ -68,9 +68,7 @@ if (data.creators) {
 "\"\n";
 n += '---\n';
 
-// generate content
-n += data.marker;
-n += '\n\n';
+// generate content (note: zotero frontmatter will be added automatically)
 n += '## Abstract ' + '\n' + data.abstractNote + '\n\n';
 n += '\n\n';
 if (data.children) {
