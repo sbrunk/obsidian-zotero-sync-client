@@ -8,6 +8,11 @@
     font-size: 10pt;
 }
 
+.zotero-sync-settings .fm-msg {
+    padding: 5px;
+    font-size: 10pt;
+}
+
 .zotero-sync-settings .nt-msg {
     padding: 5px;
     font-size: 10pt;
@@ -38,7 +43,7 @@
     height: 100%;
 }
 
-.zotero-sync-settings .filepath-code-editor, .zotero-sync-settings .note-code-editor {
+.zotero-sync-settings .filepath-code-editor, .zotero-sync-settings .note-code-editor, .zotero-sync-settings .frontmatter-code-editor {
     width: 100%;
     min-height: 200px;
     flex-grow: 1;

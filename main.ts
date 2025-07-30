@@ -58,6 +58,7 @@ interface ZoteroSyncClientSettings {
 	sync_on_interval: boolean;
 	sync_interval: number;
 	note_generator: string;
+	frontmatter_generator: string;
 	filepath_generator: string;
 }
 
@@ -66,27 +67,80 @@ const DEFAULT_SETTINGS: ZoteroSyncClientSettings = {
 	sync_on_startup: true,
 	sync_on_interval: false,
 	sync_interval: 0,
-	note_generator: `let n = '';
+	frontmatter_generator: `// Generate frontmatter properties from Zotero data
+const frontmatter = {};
+
+// Authors
 if (data.creators) {
-	data.creators.forEach(author => {
-	n += '[[People/' + author.firstName + ' ' + author.lastName + ']] '; 
-	});
-	n += '\\n';
+	frontmatter.authors = data.creators.map(author => 
+		author.firstName + ' ' + author.lastName
+	);
 }
-n += '# ' + data.title;
+
+// Title
+if (data.title) {
+	frontmatter.title = data.title;
+}
+
+// Date
 if (data.date) {
-	let year = new Date(data.date).getFullYear();
-	n += ' (' + year.toString() + ')';
+	frontmatter.date = data.date;
 }
-n += '\\n\\n';
+
+// Publication year
+if (data.date) {
+	frontmatter.year = new Date(data.date).getFullYear();
+}
+
+// Item type
+if (data.itemType) {
+	frontmatter.type = data.itemType;
+}
+
+// Tags
+if (data.tags && data.tags.length > 0) {
+	frontmatter.tags = data.tags.map(tag => tag.tag);
+}
+
+// URL
+if (data.url) {
+	frontmatter.url = data.url;
+}
+
+// DOI
+if (data.DOI) {
+	frontmatter.doi = data.DOI;
+}
+
+return frontmatter;`,
+
+	note_generator: `// Generate note content (frontmatter will be added automatically)
+let n = '';
+
+// Create title header
+if (data.title) {
+	n += '# ' + data.title + '\\n\\n';
+}
+
+// Add abstract if available
+if (data.abstractNote) {
+	n += '## Abstract\\n\\n';
+	n += data.abstractNote + '\\n\\n';
+}
+
+// Add notes from children
 if (data.children) {
 	const notes = data.children.filter(
 		c => c.itemType.toLowerCase() == 'note'
-	)
-	notes.forEach(c => {
-		n += c.note_markdown + '\\n\\n';
-	});
+	);
+	if (notes.length > 0) {
+		n += '## Notes\\n\\n';
+		notes.forEach(c => {
+			n += c.note_markdown + '\\n\\n';
+		});
+	}
 }
+
 return n;`,
 
 	filepath_generator: `let fp = '';
@@ -269,18 +323,18 @@ export default class ZoteroSyncClientPlugin extends Plugin {
 		// compute changes
 		const renames: {
 			[key: string]: {
-				from: string, to: string, note: string, zoteroKey: string
+				from: string, to: string, note: string, zoteroKey: string, frontmatter: Record<string, any>
 			}
 		} = {};
 		const updates: {
 			[key: string]: {
-				filePath: string, note: string, zoteroKey: string
+				filePath: string, note: string, zoteroKey: string, frontmatter: Record<string, any>
 			}
 		} = {};
 		const deletes: { [key: string]: string } = {};
 		const creates: {
 			[key: string]: {
-				filePath: string, note: string, zoteroKey: string
+				filePath: string, note: string, zoteroKey: string, frontmatter: Record<string, any>
 			}
 		} = {};
 		const updatedStatus: {
@@ -307,26 +361,27 @@ export default class ZoteroSyncClientPlugin extends Plugin {
 				return;
 			}
 			let note = this.generateNote(element, data.collections, data.items, library)
-			const hash = md5(note + element.key) // Include key in hash to detect key changes
+			let frontmatter = this.generateFrontmatter(element, data.collections, data.items, library)
+			const hash = md5(note + element.key + JSON.stringify(frontmatter)) // Include key and frontmatter in hash
 
 			// check if note exists
 			if (status.get(key)) {
 				// does it need to be renamed?
 				if (status.get(key)?.filePath != filePath) {
 					// rename
-					renames[key] = { from: status.get(key)?.filePath || '', to: filePath, note: note, zoteroKey: element.key }
+					renames[key] = { from: status.get(key)?.filePath || '', to: filePath, note: note, zoteroKey: element.key, frontmatter: frontmatter }
 				}
 				// does it need to be updated?
 				if (status.get(key)?.hash !== hash) {
 					// update
-					updates[key] = { filePath: filePath, note: note, zoteroKey: element.key }
+					updates[key] = { filePath: filePath, note: note, zoteroKey: element.key, frontmatter: frontmatter }
 				}
 
 				// done
 				status.delete(key)
 			} else {
 				// create
-				creates[key] = { filePath: filePath, note: note, zoteroKey: element.key }
+				creates[key] = { filePath: filePath, note: note, zoteroKey: element.key, frontmatter: frontmatter }
 			}
 
 			// add to updated status
@@ -346,14 +401,14 @@ export default class ZoteroSyncClientPlugin extends Plugin {
 		// apply changes
 		for (const [key, value] of Object.entries(renames)) {
 			try {
-				await this.renameFile(value.from, value.to, value.note, value.zoteroKey)
+				await this.renameFile(value.from, value.to, value.note, value.zoteroKey, value.frontmatter)
 			} catch (e) {
 				console.log("Failed to rename file: " + value.from + " -> " + value.to + " (" + e.message + ")");
 			}
 		}
 		for (const [key, value] of Object.entries(updates)) {
 			try {
-				await this.updateFile(value.filePath, value.note, value.zoteroKey)
+				await this.updateFile(value.filePath, value.note, value.zoteroKey, value.frontmatter)
 			} catch (e) {
 				console.log("Failed to update file: " + value.filePath + " (" + e.message + ")");
 			}
@@ -367,7 +422,7 @@ export default class ZoteroSyncClientPlugin extends Plugin {
 		}
 		for (const [key, value] of Object.entries(creates)) {
 			try {
-				await this.createFile(value.filePath, value.note, value.zoteroKey)
+				await this.createFile(value.filePath, value.note, value.zoteroKey, value.frontmatter)
 			} catch (e) {
 				console.log("Failed to create file: " + value.filePath + " (" + e.message + ")");
 			}
@@ -395,41 +450,41 @@ export default class ZoteroSyncClientPlugin extends Plugin {
 		}
 	}
 
-	async renameFile(oldPath: string, newPath: string, note: string, zoteroKey: string) {
+	async renameFile(oldPath: string, newPath: string, note: string, zoteroKey: string, frontmatter: Record<string, any> = {}) {
 		const fn = this.aquireFile(oldPath)
 		await this.ensureDirectoryExists(newPath)
 		if (!fn) {
-			await this.createFile(newPath, note, zoteroKey)
+			await this.createFile(newPath, note, zoteroKey, frontmatter)
 		} else {
 			await this.app.fileManager.renameFile(fn, newPath);
 			// Update the renamed file's content and frontmatter
 			const newFile = this.app.vault.getAbstractFileByPath(newPath) as TFile;
 			if (newFile) {
 				await this.app.vault.modify(newFile, note);
-				await this.setZoteroFrontmatter(newFile, zoteroKey);
+				await this.setZoteroFrontmatter(newFile, zoteroKey, frontmatter);
 			}
 		}
 	}
 
-	async updateFile(filePath: string, note: string, zoteroKey: string) {
+	async updateFile(filePath: string, note: string, zoteroKey: string, frontmatter: Record<string, any> = {}) {
 		const fn = this.aquireFile(filePath)
 		if (!fn) {
-			await this.createFile(filePath, note, zoteroKey)
+			await this.createFile(filePath, note, zoteroKey, frontmatter)
 		} else {
 			await this.app.vault.modify(fn as TFile, note)
-			await this.setZoteroFrontmatter(fn as TFile, zoteroKey)
+			await this.setZoteroFrontmatter(fn as TFile, zoteroKey, frontmatter)
 		}
 	}
 
-	async createFile(filePath: string, note: string, zoteroKey: string) {
+	async createFile(filePath: string, note: string, zoteroKey: string, frontmatter: Record<string, any> = {}) {
 		const fn = this.aquireFile(filePath)
 		if (fn) {
 			await this.app.vault.modify(fn as TFile, note)
-			await this.setZoteroFrontmatter(fn as TFile, zoteroKey)
+			await this.setZoteroFrontmatter(fn as TFile, zoteroKey, frontmatter)
 		} else {
 			await this.ensureDirectoryExists(filePath)
 			const newFile = await this.app.vault.create(filePath, note)
-			await this.setZoteroFrontmatter(newFile, zoteroKey)
+			await this.setZoteroFrontmatter(newFile, zoteroKey, frontmatter)
 		}
 	}
 
@@ -465,10 +520,25 @@ export default class ZoteroSyncClientPlugin extends Plugin {
 		return parse(data, collections, items, library)
 	}
 
-	async setZoteroFrontmatter(file: TFile, zoteroKey: string): Promise<void> {
-		// Use Obsidian API to set the zotero frontmatter property
+	generateFrontmatter(data: ZoteroItem | ZoteroCollectionItem, collections: Map<string, ZoteroCollectionItem>, items: Map<string, ZoteroItem>, library: ZoteroRemoteLibrary, template: string | null = null): Record<string, any> {
+		if (!template) {
+			template = this.settings.frontmatter_generator
+		}
+		const parse = new Function('data', '$collections', '$items', '$library', template)
+		const result = parse(data, collections, items, library)
+		return result || {}
+	}
+
+	async setZoteroFrontmatter(file: TFile, zoteroKey: string, additionalFrontmatter: Record<string, any> = {}): Promise<void> {
+		// Use Obsidian API to set the zotero frontmatter property and additional properties
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+			// Always set the zotero key
 			frontmatter.zotero = zoteroKey;
+			
+			// Add additional frontmatter properties
+			Object.keys(additionalFrontmatter).forEach(key => {
+				frontmatter[key] = additionalFrontmatter[key];
+			});
 		});
 	}
 
@@ -801,6 +871,8 @@ class ClientSettingTab extends PluginSettingTab {
 			fpCodeEditor.classList.add('filepath-code-editor');
 			const ntCodeEditor = document.createElement('textarea');
 			ntCodeEditor.classList.add('note-code-editor');
+			const fmCodeEditor = document.createElement('textarea');
+			fmCodeEditor.classList.add('frontmatter-code-editor');
 
 			new Setting(containerEl)
 				.setName('Template')
@@ -816,6 +888,7 @@ class ClientSettingTab extends PluginSettingTab {
 						button.setDisabled(true);
 						this.plugin.settings.filepath_generator = fpCodeEditor.value
 						this.plugin.settings.note_generator = ntCodeEditor.value
+						this.plugin.settings.frontmatter_generator = fmCodeEditor.value
 						await this.plugin.saveSettings();
 						// apply changes
 						new Notice('Zotero Sync: Updating vault (this may take a while)');
@@ -849,6 +922,12 @@ class ClientSettingTab extends PluginSettingTab {
 
 
 			fpCodeEditor.value = this.plugin.settings.filepath_generator;
+
+			const fmMsg = document.createElement("div");
+			fmMsg.classList.add('fm-msg');
+			fmMsg.innerText = 'Use `data` to access the Zotero item data and return an object with frontmatter properties. ';
+
+			fmCodeEditor.value = this.plugin.settings.frontmatter_generator;
 
 			const filterInput = document.createElement('input');
 			filterInput.classList.add('filter-input');
@@ -968,14 +1047,35 @@ class ClientSettingTab extends PluginSettingTab {
 				if (previewType === 'md') {
 					try {
 						let note = this.plugin.generateNote(element, data.collections, data.items, library, ntCodeEditor.value);
+						let frontmatter = this.plugin.generateFrontmatter(element, data.collections, data.items, library, fmCodeEditor.value);
+						
 						// Show a preview note with frontmatter (for display purposes only)
-						const previewNote = `---\nzotero: ${element.key}\n---\n\n${note}`;
+						let previewNote = '---\n';
+						previewNote += `zotero: ${element.key}\n`;
+						Object.keys(frontmatter).forEach(key => {
+							const value = frontmatter[key];
+							if (Array.isArray(value)) {
+								previewNote += `${key}:\n`;
+								value.forEach(item => {
+									previewNote += `  - ${item}\n`;
+								});
+							} else {
+								previewNote += `${key}: ${value}\n`;
+							}
+						});
+						previewNote += '---\n\n' + note;
+						
 						ntPreview.innerText = previewNote;
 						ntCodeEditor.classList.remove('zotero-sync-settings-error');
+						fmCodeEditor.classList.remove('zotero-sync-settings-error');
 					} catch (e) {
 						// display full error in preview
 						ntPreview.innerText = e;
-						ntCodeEditor.classList.add('zotero-sync-settings-error')
+						if (e.toString().includes('frontmatter')) {
+							fmCodeEditor.classList.add('zotero-sync-settings-error');
+						} else {
+							ntCodeEditor.classList.add('zotero-sync-settings-error');
+						}
 						return;
 					}
 				} else if (previewType === 'md_prev') {
@@ -992,12 +1092,13 @@ class ClientSettingTab extends PluginSettingTab {
 			ntPreviewToggle.addEventListener('change', refreshPreview);
 			fpCodeEditor.addEventListener('input', debounce(refreshPreview, 1000));
 			ntCodeEditor.addEventListener('input', debounce(refreshPreview, 1000));
+			fmCodeEditor.addEventListener('input', debounce(refreshPreview, 1000));
 
 
-			// Form grid layout
+			// Form grid layout - now 3x2 grid
 			const table = containerEl.createEl("table");
 			table.classList.add('form-grid');
-			for (let i = 0; i < 2; i++) {
+			for (let i = 0; i < 3; i++) {
 				const row = document.createElement("tr");
 				for (let j = 0; j < 2; j++) {
 					const cell = document.createElement("td");
@@ -1015,11 +1116,16 @@ class ClientSettingTab extends PluginSettingTab {
 						formContainer.appendChild(filterInput);
 						formContainer.appendChild(fileSelect);
 					} else if (i === 1 && j === 0) {
-						formContainer.appendChild(ntMsg);
-						formContainer.appendChild(ntCodeEditor);
+						formContainer.appendChild(fmMsg);
+						formContainer.appendChild(fmCodeEditor);
 					} else if (i === 1 && j === 1) {
 						formContainer.appendChild(ntPreviewToggle);
 						formContainer.appendChild(ntPreview);
+					} else if (i === 2 && j === 0) {
+						formContainer.appendChild(ntMsg);
+						formContainer.appendChild(ntCodeEditor);
+					} else if (i === 2 && j === 1) {
+						// Empty cell or additional controls could go here
 					}
 
 					cell.appendChild(formContainer);
